@@ -1,0 +1,13 @@
+python-dotenv
+streamlit
+Pillow
+google-generativeai
+IPython
+langchain
+langchain-google-genai
+pandas
+numpy
+seaborn
+boto3
+nltk
+textblob
