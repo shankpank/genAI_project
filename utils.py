@@ -186,7 +186,7 @@
 #     return {"sql_query": sql_query, "query_result": query_result}
 
 # 
-
+import sqlite3
 import os
 from dotenv import load_dotenv
 load_dotenv()
