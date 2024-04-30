@@ -1,10 +1,9 @@
 import os
-import sqlite3
 from dotenv import load_dotenv
 load_dotenv()
 import ast
 import re
-import pandas as pd
+import sqlite3
 from langchain_openai import AzureChatOpenAI
 from langchain_openai import AzureOpenAIEmbeddings
 from langchain_community.utilities import SQLDatabase
@@ -19,27 +18,19 @@ from langchain_core.runnables import RunnablePassthrough, RunnableParallel, chai
 from langchain.chains import create_sql_query_chain
 from langchain_core.output_parsers import StrOutputParser
 from operator import itemgetter
+from langchain_core.prompts import PromptTemplate
+import pandas as pd
+import base64
  
-azure_openai_endpoint = 'https://mms3genaiaoi.openai.azure.com/' #os.getenv('AZURE_OPENAI_ENDPOINT')
-azure_openai_key = 'b03d7d16aa5341d6a4424f9d1a0c19ba'  #os.getenv('AZURE_OPENAI_KEY')
-azure_openai_api_version = '2023-07-01-preview'
-azure_openai_gpt_deployment = 'mms3genai-gpt-35-turbo'
-azure_openai_embedding_deployment = 'mms3genai-text-embedding-ada-2'  #os.getenv('AZURE_OPENAI_EMBEDDING_DEPLOYMENT')
-
-title_df = pd.read_excel(r"s3://firstawsbucket-testing/Title_Info.xlsx")
-talent_df = pd.read_excel(r"s3://firstawsbucket-testing/Talent_Info.xlsx")
-title_boxoffice_df = pd.read_excel(r"s3://firstawsbucket-testing/Title_BoxOffice_Info.xlsx")
+azure_openai_endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')
+azure_openai_key = os.getenv('AZURE_OPENAI_KEY')
+azure_openai_api_version = os.getenv('AZURE_OPENAI_API_VERSION')
+azure_openai_gpt_deployment = os.getenv('AZURE_OPENAI_GPT_DEPLOYMENT')
+azure_openai_embedding_deployment = os.getenv('AZURE_OPENAI_EMBEDDING_DEPLOYMENT')
  
-conn = sqlite3.connect(r'/home/ec2-user/genAI_project/wbd_data.sqlite')
-c = conn.cursor()
- 
-c.execute('CREATE TABLE if not exists title_info (PICTURE_NR INTEGER, RELEASE_NR INTEGER , TITLE_NAME TEXT, PRIMARY_DISTRIBUTOR TEXT, SECONDARY_DISTRIBUTORS TEXT, PRIMARY_GENRE TEXT, SECONDARY_GENRES TEXT, RATING TEXT, RELEASE_DATE TEXT, RELEASE_YEAR INTEGER, RELEASE_FORMAT TEXT, WIDE_RELEASE_DATE TEXT, PRODCO_FULL_NAME TEXT)')
-c.execute('CREATE TABLE if not exists talent_info (RELEASE_NR INTEGER, PICTURE_FULL_NAME TEXT, TALENT_FULL_NAME TEXT, JOB_FULL_NAME TEXT)')
-c.execute('CREATE TABLE if not exists title_boxoffice_info (RELEASE_NR INTEGER, PICTURE_FULL_NAME TEXT, CUME_GROSS REAL, OPENING_DAY_AMOUNT REAL, OPENING_DAY_LOCS INTEGER, OPENING_WEEKEND_AMOUNT REAL, OPENING_WEEKEND_LOCS INTEGER, WIDE_OPNG_DAY_AMOUNT REAL, WIDE_OPNG_DAY_LOCS INTEGER, WIDE_OPNG_WEEKEND_AMOUNT REAL, WIDE_OPNG_WEEKEND_LOCS INTEGER)')
-
-database_uri ='/home/ec2-user/genAI_project/wbd_data.sqlite' #os.getenv('DATABASE_URI')
-talent_data_path = '/home/ec2-user/genAI_project/chroma_db/talent_data' #os.getenv('TALENT_DATA_PATH')
-film_data_path = '/home/ec2-user/genAI_project/chroma_db/film_data'  #os.getenv('FILM_DATA_PATH')
+database_uri = os.getenv('DATABASE_URI')
+talent_data_path = os.getenv('TALENT_DATA_PATH')
+film_data_path = os.getenv('FILM_DATA_PATH')
  
  
 llm = AzureChatOpenAI(
@@ -120,10 +111,10 @@ def create_table_chain(db):
     return {"input": itemgetter("question")} | table_chain
  
 def create_retriever_chain(talent_vectorstore, film_vectorstore):
-    system = """Given a user query you have to classify wheather it is related to a film or the talent we are querying upon.
-    If the query is about a film then you need to return keyword 'FILM' and if it a person or talent return with 'TALENT'.
-    The answer should be either the keyword 'FILM' or 'TALENT'
-    If you dont know the answer, just say 'I dont know'."""
+    system = """You are an AI Assistant that helps in segregating the user queries asked upton database based on type of the question\
+    You need to segregate the user query either in 'FILM' type or 'TALENT' type. If the question asked by user relates any \
+    info about movie return the keyword 'FILM' and if the query refers to any person return 'TALENT'.\n\
+    ***You must be returning any one of the keyword 'FILM' or 'TALENT'***"""
  
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -147,6 +138,10 @@ def create_retriever_chain(talent_vectorstore, film_vectorstore):
     def custom_chain(question):
         response = query_analyser.invoke(question)
         print(response)
+        if 'FILM' in response:
+            response = 'FILM'
+        elif 'TALENT' in response:
+            response = 'TALENT'
         retriever = retrievers[response]
         print(retriever)
         result = retriever.invoke(question)
@@ -157,9 +152,12 @@ def create_retriever_chain(talent_vectorstore, film_vectorstore):
     return (itemgetter("question") | custom_chain | (lambda docs: "\n".join(doc.page_content for doc in docs)))
  
 def create_query_chain(db):
+    
     system = """You are a SQLite expert. Given an input question, create a syntactically \
     correct SQLite query to run. Unless otherwise specificed, do not return more than \
-    {top_k} rows.\n**Only return the SQL query**\n\nHere is the relevant table info: {table_info}\nOptimize this query to have the best results.\nHere is a non-exhaustive \
+    {top_k} rows. Be careful to not query for columns that do not exist. Also, pay attention to which column is in which table.\
+    Pay attention to use date('now') function to get the current date, if the question involves "today".\n**Only return the SQL query**\n\n\
+    Here is the relevant table info: {table_info}\nOptimize this query to have the best results.\nHere is a non-exhaustive \
     list of possible feature values. If filtering on a feature value make sure to check its spelling \
     against this list first:\n\n{proper_nouns}"""
  
@@ -168,17 +166,15 @@ def create_query_chain(db):
     query_chain = create_sql_query_chain(llm, db, prompt=prompt)
  
     return query_chain
-
+ 
 def parser_output():
     output_parser = StrOutputParser()
     chain = llm | output_parser
     return chain
-
+ 
 def search(question: str) -> dict:
     db = get_db_connection()
-    #talent_vectorstore, film_vectorstore = create_index(db)    #Uncomment for first execution
-    #talent_vectorstore = Chroma(collection_name="talent_name", persist_directory=talent_data_path, embedding_function=embeddings)
-    #film_vectorstore = Chroma(collection_name="film_name", persist_directory=film_data_path, embedding_function=embeddings)
+   
     try:
         print('Using Existing Chromadb')
         talent_vectorstore = Chroma(collection_name="talent_name", persist_directory=talent_data_path, embedding_function=embeddings)
@@ -186,7 +182,6 @@ def search(question: str) -> dict:
     except:
         print('Creating new Chromadb')
         talent_vectorstore, film_vectorstore = create_index(db)
-
    
     table_chain = create_table_chain(db)
     retriever_chain = create_retriever_chain(talent_vectorstore, film_vectorstore)
@@ -199,14 +194,63 @@ def search(question: str) -> dict:
         }
     )
     | query_chain)
-    
+   
     sql_query = combined_chain.invoke({"question": question})
     print("SQL Query",sql_query)
     query_result = db.run(sql_query)
     print("Query Result",query_result)
-    return {"sql_query": sql_query, "query_result": query_result}
+    #return {"sql_query": sql_query, "query_result": query_result}
+    return query_result
+ 
+ 
+def convert_to_excel(output):
+    prompt_template = f"You an AI Assistant that converts a chatbot's response into pipe delimited data.Based upon following instructions generate the response for given context:\
+    **Instructions**\
+    --Only return the tabular data.\
+    --The first row of table must be the column header immediately followed by tabular data.\
+    --There shouldn't be any row seperator between header and data.\
+    --Do not name the coulmns as Column1 etc. Give proper naming defining the data column.\
+    --Do not include rows such as Column1|Column2|Column3.... and -|-|-....\
+    --If the context dosen't provide any valid column names for data, makeup appropriate column names best fitting the data.\
+    Refer the below context to generate the response.\
+    Context:\n{output}"
+    data = llm.invoke(prompt_template).content
+    print(data)
+    df = pd.DataFrame([x.split('|') for x in data.split('\n')])
+    df=df.to_csv(index=False,header=False)
+    b64 = base64.b64encode(df.encode()).decode()
+    href = f'<button type="button"><a href="data:file/csv;base64,{b64}" download="generated_response.csv">Download Response⬇️</a></button>'
+    return href
 
-if __name__ == "__main__":
-    question = "What is the gross income for 'Avengars: Engamme' till date?"
-    result = search(question)
-    print(result)
+ 
+def get_response(user_input):
+    output_parser = StrOutputParser()
+    chain = llm | output_parser
+ 
+    try:
+        response = search(user_input)
+ 
+        if response:
+            response = chain.invoke(f"Based upon following instructions generate the response for given context:\
+                                    **Instructions**\
+                                    --Your task is to generate a human readable response for given context from database.\
+                                    --The context includes the User's question and answer obtained from db.\
+                                    --If the answer is a singular value answer it in a interactice manner.\
+                                    --If the answer is too long or contains multiple rows and columns display it in the *tabular format*.\
+                                    --If the answer includes any Numerical values display them without decimal places e.g. 20, 1933, 3456 etc.\
+                                    --Always include '$' for any monetory values and make necessary formatting to make them presentable.\
+                                    **Context**\
+                                    -User's Question: {user_input}\
+                                    --Database result:\
+                                    {response}")
+            
+       
+        else:
+            response = chain.invoke(f"Generate a concise response for below context:\nApologies, there is no relevant information about your question \'{user_input}\'.\Try asking a differnt question or rephrase the question")
+ 
+    except Exception as e:
+        response = chain.invoke(f"Generate a concise response for below context:\n \
+                                 Apologies, there is no relevant information about your question \'{user_input}\'.\Try asking a differnt question or rephrase the question")
+        #raise e
+   
+    return response
